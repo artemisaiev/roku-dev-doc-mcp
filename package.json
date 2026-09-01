@@ -1,0 +1,42 @@
+{
+  "name": "roku-dev-doc-mcp",
+  "version": "1.0.0",
+  "description": "Local MCP server serving Roku/BrightScript development documentation, mirrored from rokudev/dev-doc and indexed with SQLite FTS5",
+  "type": "module",
+  "bin": {
+    "roku-dev-doc-mcp": "./bin/roku-dev-doc-mcp.js"
+  },
+  "main": "./src/server.js",
+  "exports": {
+    ".": "./src/server.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node bin/roku-dev-doc-mcp.js",
+    "sync": "node bin/roku-dev-doc-mcp.js --sync",
+    "test": "node --test"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "roku",
+    "brightscript",
+    "scenegraph",
+    "documentation"
+  ],
+  "license": "Unlicense",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "better-sqlite3": "^13.0.3",
+    "tar": "^7.5.22",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  }
+}
