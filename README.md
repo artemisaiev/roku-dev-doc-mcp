@@ -2,7 +2,7 @@
 
 A local [Model Context Protocol](https://modelcontextprotocol.io) server that
 serves Roku / BrightScript development documentation, mirrored from the `docs/`
-folder of [rokudev/dev-doc](https://github.com/rokudev/dev-doc) (branch `v2.0`)
+folder of [rokudev/dev-doc](https://gitlab.com/rokudev/dev-doc) (branch `v2.0`)
 and indexed in SQLite with an FTS5 full-text index.
 
 Read-only reference tooling: it never writes to the upstream repo, and needs no
@@ -29,6 +29,23 @@ claude mcp add roku-docs -- roku-dev-doc-mcp
 
 ### Claude Desktop / generic MCP config
 
+**If you use a Node version manager (nvm, fnm, asdf, volta), pin an absolute
+Node path rather than using the bare command:**
+
+```json
+{
+  "mcpServers": {
+    "roku-docs": {
+      "command": "/absolute/path/to/node22/bin/node",
+      "args": ["/absolute/path/to/roku-dev-doc-mcp/bin/roku-dev-doc-mcp.js"]
+    }
+  }
+}
+```
+
+The bare command works only when `#!/usr/bin/env node` happens to resolve to
+Node >= 22:
+
 ```json
 {
   "mcpServers": {
@@ -39,18 +56,18 @@ claude mcp add roku-docs -- roku-dev-doc-mcp
 }
 ```
 
-During development, before installing globally:
+A GUI app does not inherit your shell's `PATH`. Claude Desktop compensates by
+building its own, which globs **every** `~/.nvm/versions/node/*/bin` — so an old
+version sorting ahead of the current one wins, no matter what
+`nvm alias default` says. `v16.20.2` sorts before `v22.20.0`, and the SQLite
+driver is a native module that cannot load on Node 16.
 
-```json
-{
-  "mcpServers": {
-    "roku-docs": {
-      "command": "node",
-      "args": ["/absolute/path/to/roku-dev-doc-mcp/bin/roku-dev-doc-mcp.js"]
-    }
-  }
-}
-```
+Symptom when this happens: the server dies immediately and Claude Desktop
+reports `Server disconnected`, with
+`FATAL ERROR: Error::New napi_get_last_error_info` in
+`~/Library/Logs/Claude/mcp-server-roku-docs.log`. The entrypoint now checks the
+Node version first and prints a readable error instead, so check that log before
+assuming anything else is wrong.
 
 On first run the index is empty, so the server kicks off a sync **in the
 background** — it connects immediately rather than blocking the client's
@@ -101,7 +118,7 @@ rather than copying it, so it cannot drift:
 | `search_roku_docs` | `query`, `limit?`, `prefix?` | BM25-ranked full-text search with highlighted snippets |
 | `get_roku_doc` | `path`, `section?`, `full?` | Read one page; large pages return an outline |
 | `list_roku_docs` | `prefix?`, `limit?` | Browse the folder tree |
-| `refresh_roku_docs` | `force?` | Re-sync from GitHub, returns a change summary |
+| `refresh_roku_docs` | `force?` | Re-sync from GitLab, returns a change summary |
 
 `search_roku_docs` accepts plain keywords as well as FTS5 syntax
 (`"exact phrase"`, `term*`, `AND`/`OR`/`NOT`). A malformed query degrades to a
@@ -182,11 +199,14 @@ staleness threshold at startup, or when you ask for one (`refresh_roku_docs`
 or `--sync`). All startup syncs are non-blocking. Only one sync runs at a time —
 concurrent callers share the same in-flight run.
 
-1. Read the head SHA of the `v2.0` branch. If it matches the last synced SHA
-   and the index is non-empty, stop — nothing to do.
-2. Download the repo tarball **for that exact commit** (~1.4 MB, one request).
-   Pinning to the SHA means a branch that moves mid-sync can't leave a
-   recorded SHA that was never actually fetched.
+1. Read the head SHA of the `v2.0` branch
+   (`GET /api/v4/projects/:project/repository/branches/v2.0`, where GitLab
+   returns it as `commit.id`). If it matches the last synced SHA and the index
+   is non-empty, stop — nothing to do.
+2. Download the repo archive **for that exact commit**
+   (`GET /api/v4/projects/:project/repository/archive.tar.gz?sha=<sha>`,
+   ~1.8 MB, one request). Pinning to the SHA means a branch that moves mid-sync
+   can't leave a recorded SHA that was never actually fetched.
 3. Stream it through gunzip + tar in memory, keeping only `docs/**/*.md`.
 4. Recompute each file's **git blob SHA** locally
    (`sha1("blob <len>\0" + bytes)`) and compare against the stored value.
@@ -195,7 +215,21 @@ concurrent callers share the same in-flight run.
 5. Delete rows no longer present upstream, then update the sync markers.
 
 One HTTP request per sync (plus one cheap API call for the SHA check). The
-tarball is never written to disk.
+archive is never written to disk.
+
+### Archive throttling
+
+GitLab rate-limits repository archive generation per project and answers a
+throttled request with **`406 Not Acceptable`**, not 429. The cooldown runs to
+tens of seconds, so the archive fetch retries up to 5 times with backoff capped
+at 30s (honouring `Retry-After` when present), spanning roughly 50s in total.
+A short retry loop is not enough here: several attempts inside ~6s all fail
+while the identical request succeeds a minute later.
+
+If every attempt fails the sync throws, the existing index is left untouched and
+keeps being served, and a background refresh logs the failure without taking the
+server down.
+
 
 `last_synced_at` records when the index was last *confirmed* in sync with
 upstream, so it advances even when the SHA check finds nothing to download.
@@ -218,7 +252,7 @@ these are indexed by title and reported as such when read.
 | Variable | Purpose |
 | --- | --- |
 | `ROKU_DOCS_MCP_DATA_DIR` | Override the data directory |
-| `GITHUB_TOKEN` / `GH_TOKEN` | Raise the GitHub API rate limit (optional) |
+| `GITLAB_TOKEN` / `GL_TOKEN` | Raise the GitLab API rate limit (optional) |
 | `ROKU_DOCS_MCP_MAX_DOC_BYTES` | Whole-doc size threshold (default 12000) |
 | `ROKU_DOCS_MCP_MAX_SECTION_BYTES` | Hard ceiling on any one response (default 60000) |
 | `ROKU_DOCS_MCP_MAX_AGE_DAYS` | Background refresh threshold in days (default 7, `0` disables) |
@@ -230,9 +264,9 @@ directory:
 - Linux — `$XDG_DATA_HOME/roku-dev-doc-mcp/` or `~/.local/share/roku-dev-doc-mcp/`
 - Windows — `%LOCALAPPDATA%\roku-dev-doc-mcp\Data\`
 
-Only one unauthenticated GitHub API call is made per sync (the branch SHA
-check), so the 60/hour unauthenticated limit is not a practical concern.
-`GITHUB_TOKEN` is only worth setting for very frequent automatic refreshes.
+Only one unauthenticated GitLab API call is made per sync (the branch SHA
+check), against a 500/minute unauthenticated limit, so rate limiting is not a
+practical concern. `GITLAB_TOKEN` only matters behind a shared egress IP.
 
 ## Development
 
@@ -246,7 +280,7 @@ roku-dev-doc-mcp/
 ├── bin/roku-dev-doc-mcp.js   # CLI entrypoint (shebang), arg handling only
 ├── src/
 │   ├── server.js             # MCP server, tool + resource registration
-│   ├── sync.js               # GitHub fetch, extract, frontmatter, upsert
+│   ├── sync.js               # GitLab fetch, extract, frontmatter, upsert
 │   ├── sections.js           # markdown section splitting for large docs
 │   ├── db.js                 # SQLite schema, FTS5 triggers, queries
 │   └── paths.js              # per-user data dir resolution
@@ -268,7 +302,7 @@ away:
 
 - **The documentation content itself.** The docs this server mirrors belong to
   Roku and are reproduced unmodified from
-  [rokudev/dev-doc](https://github.com/rokudev/dev-doc). The public-domain
+  [rokudev/dev-doc](https://gitlab.com/rokudev/dev-doc). The public-domain
   dedication applies to the code in this repository, not to the indexed text.
 - **Dependencies.** Each npm dependency keeps its own license — currently MIT
   (`@modelcontextprotocol/sdk`, `better-sqlite3`, `zod`), ISC (`yaml`), and

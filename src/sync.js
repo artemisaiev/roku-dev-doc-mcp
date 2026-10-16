@@ -19,9 +19,13 @@ import {
 
 export const REPO = 'rokudev/dev-doc';
 export const REF = 'v2.0';
+export const HOST = 'gitlab.com';
 
-const API_BASE = 'https://api.github.com';
-const CODELOAD = 'https://codeload.github.com';
+const API_BASE = `https://${HOST}/api/v4`;
+
+/** URL-encoded `namespace/project`, which GitLab accepts anywhere a project id does. */
+const PROJECT = encodeURIComponent(REPO);
+
 const UA = 'roku-dev-doc-mcp';
 
 /** Only one sync may run at a time; concurrent callers await the same run. */
@@ -56,7 +60,7 @@ async function runSync({ force = false, onProgress } = {}) {
   const started = Date.now();
   const log = (msg) => onProgress?.(msg);
 
-  log(`Checking ${REPO}@${REF} for changes…`);
+  log(`Checking ${HOST}/${REPO}@${REF} for changes…`);
   const head = await fetchHeadSha();
   const lastSynced = getMeta('last_synced_sha');
   const haveDocs = countDocs() > 0;
@@ -84,13 +88,13 @@ async function runSync({ force = false, onProgress } = {}) {
   // mid-sync cannot leave us recording a SHA we never actually fetched.
   const ref = head || REF;
   log(`Downloading tarball for ${ref.slice(0, 12)}…`);
-  const archive = await fetchTarball(ref);
+  const archive = await fetchTarball(ref, { onProgress });
   log(`Extracting markdown from ${(archive.length / 1048576).toFixed(2)} MB archive…`);
 
   const entries = await extractDocs(archive);
   if (entries.length === 0) {
     throw new Error(
-      `No markdown files found under docs/ in the ${REPO}@${ref} tarball — ` +
+      `No markdown files found under docs/ in the ${HOST}/${REPO}@${ref} tarball — ` +
         'the upstream layout may have changed.'
     );
   }
@@ -155,11 +159,16 @@ async function runSync({ force = false, onProgress } = {}) {
 
 /* --------------------------------------------------------------- fetching */
 
-function ghHeaders(extra = {}) {
-  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+/**
+ * GitLab takes a personal access token in `PRIVATE-TOKEN`. Entirely optional
+ * here: the project is public and unauthenticated API calls get 500/min, so a
+ * token only matters behind a shared egress IP.
+ */
+function glHeaders(extra = {}) {
+  const token = process.env.GITLAB_TOKEN || process.env.GL_TOKEN;
   return {
     'User-Agent': UA,
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(token ? { 'PRIVATE-TOKEN': token } : {}),
     ...extra,
   };
 }
@@ -172,13 +181,14 @@ function ghHeaders(extra = {}) {
  */
 export async function fetchHeadSha() {
   try {
-    const res = await fetch(`${API_BASE}/repos/${REPO}/branches/${REF}`, {
-      headers: ghHeaders({ Accept: 'application/vnd.github+json' }),
-      signal: AbortSignal.timeout(20_000),
-    });
+    const res = await fetch(
+      `${API_BASE}/projects/${PROJECT}/repository/branches/${encodeURIComponent(REF)}`,
+      { headers: glHeaders({ Accept: 'application/json' }), signal: AbortSignal.timeout(20_000) }
+    );
     if (!res.ok) return null;
     const body = await res.json();
-    return typeof body?.commit?.sha === 'string' ? body.commit.sha : null;
+    // GitLab names it `commit.id`, where the GitHub API used `commit.sha`.
+    return typeof body?.commit?.id === 'string' ? body.commit.id : null;
   } catch {
     return null;
   }
@@ -188,23 +198,66 @@ export async function fetchHeadSha() {
  * @param {string} ref commit SHA or branch name
  * @returns {Promise<Buffer>} gzipped tarball
  */
-async function fetchTarball(ref) {
-  const url = `${CODELOAD}/${REPO}/tar.gz/${encodeURIComponent(ref)}`;
-  const res = await fetch(url, {
-    headers: ghHeaders(),
-    signal: AbortSignal.timeout(120_000),
-  });
-  if (!res.ok) {
-    throw new Error(`Failed to download ${url}: HTTP ${res.status} ${res.statusText}`);
+/**
+ * Status codes worth a retry.
+ *
+ * GitLab rate-limits repository archive generation per project, and answers a
+ * throttled request with `406 Not Acceptable` rather than 429. The cooldown
+ * runs to tens of seconds, so the backoff below has to be measured in tens of
+ * seconds too — a handful of retries inside ~6s all fail while the identical
+ * request succeeds a minute later.
+ */
+const RETRYABLE = new Set([406, 408, 429, 500, 502, 503, 504]);
+
+async function fetchTarball(ref, { attempts = 5, onProgress } = {}) {
+  const url =
+    `${API_BASE}/projects/${PROJECT}/repository/archive.tar.gz` +
+    `?sha=${encodeURIComponent(ref)}`;
+
+  let last = '';
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    let res;
+    try {
+      res = await fetch(url, {
+        headers: glHeaders(),
+        signal: AbortSignal.timeout(120_000),
+      });
+    } catch (err) {
+      last = err.name === 'TimeoutError' ? 'request timed out' : err.message;
+      if (attempt === attempts) break;
+      await backoff(attempt, last, onProgress);
+      continue;
+    }
+
+    if (res.ok) return Buffer.from(await res.arrayBuffer());
+
+    last = `HTTP ${res.status} ${res.statusText}`;
+    if (!RETRYABLE.has(res.status) || attempt === attempts) break;
+    const retryAfter = Number.parseInt(res.headers.get('retry-after') ?? '', 10);
+    await backoff(attempt, last, onProgress, Number.isFinite(retryAfter) ? retryAfter : 0);
   }
-  return Buffer.from(await res.arrayBuffer());
+
+  throw new Error(`Failed to download ${url}: ${last} (after ${attempts} attempts)`);
+}
+
+/**
+ * Exponential backoff with jitter, capped at 30s: roughly 2s, 5s, 13s, 30s, so
+ * five attempts span about 50s — long enough to outlast an archive throttle.
+ * Honours `Retry-After` when the server sends one.
+ */
+async function backoff(attempt, reason, onProgress, retryAfter) {
+  const base = Math.min(30_000, 2000 * 2.5 ** (attempt - 1));
+  const jittered = Math.round(base * (0.8 + Math.random() * 0.4));
+  const ms = retryAfter ? Math.min(60_000, retryAfter * 1000) : jittered;
+  onProgress?.(`Archive fetch failed (${reason}); retrying in ${(ms / 1000).toFixed(0)}s…`);
+  await new Promise((r) => setTimeout(r, ms));
 }
 
 /**
  * Stream the tarball through gunzip + tar, keeping only markdown under the
  * archive's `docs/` folder. The archive root is a single generated directory
- * (e.g. `dev-doc-2.0/`) whose exact name tracks the ref, so it is matched
- * generically and stripped.
+ * (`dev-doc-v2.0-<sha>/` on GitLab, `dev-doc-2.0/` on GitHub) whose exact name
+ * tracks the host and ref, so it is matched generically and stripped.
  *
  * @param {Buffer} archive
  * @returns {Promise<{path:string, raw:string, sha:string, bytes:number}[]>}
@@ -244,8 +297,8 @@ async function extractDocs(archive) {
 
 /**
  * The SHA-1 git assigns a blob: sha1("blob <bytelength>\0" + bytes).
- * Computing it locally reproduces exactly what the GitHub tree API would have
- * reported, so stored SHAs stay comparable across sync strategies.
+ * Computing it locally keeps stored SHAs comparable across sync strategies and
+ * across hosts, since git blob SHAs do not depend on the forge.
  * @param {Buffer} buf
  * @returns {string}
  */

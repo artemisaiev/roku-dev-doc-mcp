@@ -3,8 +3,9 @@
  * CLI entrypoint. Deliberately thin: argument handling only, with all of the
  * real work living in src/ so it stays testable without spawning a process.
  */
+import '../src/preflight.js'; // must precede any import that loads better-sqlite3
 import { SERVER_NAME, SERVER_VERSION, log, start } from '../src/server.js';
-import { REF, REPO, indexAgeDays, isStale, maxAgeDays, syncDocs, syncStatus } from '../src/sync.js';
+import { HOST, REF, REPO, indexAgeDays, isStale, maxAgeDays, syncDocs, syncStatus } from '../src/sync.js';
 import { dataDir, dbPath } from '../src/paths.js';
 
 const args = new Set(process.argv.slice(2));
@@ -12,7 +13,7 @@ const args = new Set(process.argv.slice(2));
 if (args.has('--help') || args.has('-h')) {
   process.stdout.write(
     `${SERVER_NAME} v${SERVER_VERSION}\n\n` +
-      `Local MCP server serving Roku/BrightScript documentation from ${REPO}@${REF}.\n\n` +
+      `Local MCP server serving Roku/BrightScript documentation from ${HOST}/${REPO}@${REF}.\n\n` +
       'Usage:\n' +
       `  ${SERVER_NAME}              Start the MCP server on stdio (default)\n` +
       `  ${SERVER_NAME} --sync       Sync the docs index and exit\n` +
@@ -23,7 +24,7 @@ if (args.has('--help') || args.has('-h')) {
       'Environment:\n' +
       '  ROKU_DOCS_MCP_DATA_DIR     Override the data directory\n' +
       '  ROKU_DOCS_MCP_MAX_AGE_DAYS Background refresh threshold (default 7, 0 disables)\n' +
-      '  GITHUB_TOKEN               Raise GitHub API rate limits (optional)\n\n' +
+      '  GITLAB_TOKEN               Raise GitLab API rate limits (optional)\n\n' +
       `Data directory: ${dataDir()}\n`
   );
   process.exit(0);
@@ -40,7 +41,7 @@ if (args.has('--status')) {
   const max = maxAgeDays();
   process.stdout.write(
     `${SERVER_NAME} v${SERVER_VERSION}\n` +
-      `  source:      ${REPO}@${REF}\n` +
+      `  source:      ${HOST}/${REPO}@${REF}\n` +
       `  database:    ${dbPath()}\n` +
       `  documents:   ${s.docCount}\n` +
       `  last synced: ${s.lastSyncedAt ?? 'never'}` +

@@ -1,6 +1,6 @@
 {
   "name": "roku-dev-doc-mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Local MCP server serving Roku/BrightScript development documentation, mirrored from rokudev/dev-doc and indexed with SQLite FTS5",
   "type": "module",
   "bin": {
@@ -30,7 +30,7 @@
   ],
   "license": "Unlicense",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

@@ -11,6 +11,7 @@ import {
   search as searchDocs,
 } from './db.js';
 import {
+  HOST,
   REF,
   REPO,
   indexAgeDays,
@@ -52,13 +53,13 @@ function notReady() {
   if (isSyncing()) {
     return (
       'The Roku docs index is still building (first run downloads and indexes ' +
-      `~590 documents from ${REPO}@${REF}; this usually takes a few seconds). ` +
+      `~770 documents from ${HOST}/${REPO}@${REF}; this usually takes a few seconds). ` +
       'Please retry shortly.'
     );
   }
   return (
     'The Roku docs index is empty. Run the `refresh_roku_docs` tool to download ' +
-    `and index the documentation from ${REPO}@${REF}.`
+    `and index the documentation from ${HOST}/${REPO}@${REF}.`
   );
 }
 
@@ -70,7 +71,7 @@ function notReady() {
  * are kept self-sufficient; this carries the "when to reach for it" layer that
  * tool schemas cannot express.
  */
-export const INSTRUCTIONS = `Roku and BrightScript development documentation, mirrored from ${REPO}@${REF} and indexed locally for full-text search.
+export const INSTRUCTIONS = `Roku and BrightScript development documentation, mirrored from ${HOST}/${REPO}@${REF} and indexed locally for full-text search.
 
 Use this instead of answering BrightScript/SceneGraph questions from memory. Component names, interface methods, node fields and their defaults are exactly the details that get misremembered convincingly. A five-second lookup beats a plausible guess, and if a lookup contradicts your recollection, the docs win.
 
@@ -217,7 +218,7 @@ function registerTools(server) {
       }
 
       const doc = getDoc(resolved);
-      const header = `# ${doc.title}\n\nSource: ${REPO}@${REF} — ${doc.path} (${formatBytes(doc.bytes)})`;
+      const header = `# ${doc.title}\n\nSource: ${HOST}/${REPO}@${REF} — ${doc.path} (${formatBytes(doc.bytes)})`;
 
       if (!doc.content.trim()) {
         return text(
@@ -328,7 +329,7 @@ function registerTools(server) {
     {
       title: 'Refresh Roku docs',
       description:
-        `Re-sync the local index from ${REPO}@${REF}. Skips the download when the upstream ` +
+        `Re-sync the local index from ${HOST}/${REPO}@${REF}. Skips the download when the upstream ` +
         'branch has not moved since the last sync; pass `force: true` to re-index regardless. ' +
         'Returns a summary of what changed.',
       inputSchema: {
@@ -345,14 +346,14 @@ function registerTools(server) {
 
         if (r.skipped) {
           return text(
-            `Already up to date with ${REPO}@${REF} (${short(r.sha)}).\n` +
+            `Already up to date with ${HOST}/${REPO}@${REF} (${short(r.sha)}).\n` +
               `${r.total} documents indexed. Last synced: ${status.lastSyncedAt}.\n` +
               'Pass force: true to re-index anyway.'
           );
         }
 
         return text(
-          `Synced ${REPO}@${REF} (${short(r.sha)}) in ${(r.durationMs / 1000).toFixed(1)}s.\n\n` +
+          `Synced ${HOST}/${REPO}@${REF} (${short(r.sha)}) in ${(r.durationMs / 1000).toFixed(1)}s.\n\n` +
             `  added:     ${r.added}\n` +
             `  updated:   ${r.updated}\n` +
             `  removed:   ${r.removed}\n` +
@@ -363,8 +364,8 @@ function registerTools(server) {
       } catch (err) {
         return fail(
           `Sync failed: ${err.message}\n\n` +
-            'The existing local index (if any) is unchanged. If this is a GitHub rate limit, ' +
-            'set a GITHUB_TOKEN environment variable and try again.'
+            'The existing local index (if any) is unchanged. If this is a GitLab rate limit, ' +
+            'set a GITLAB_TOKEN environment variable and try again.'
         );
       }
     }
@@ -398,7 +399,7 @@ function registerResources(server) {
     }),
     {
       title: 'Roku documentation page',
-      description: `Markdown source of a page from ${REPO}@${REF}`,
+      description: `Markdown source of a page from ${HOST}/${REPO}@${REF}`,
       mimeType: 'text/markdown',
     },
     async (uri, { path }) => {
@@ -412,7 +413,7 @@ function registerResources(server) {
           {
             uri: uri.href,
             mimeType: 'text/markdown',
-            text: `# ${doc.title}\n\n<!-- ${REPO}@${REF} — ${doc.path} -->\n\n${doc.content}`,
+            text: `# ${doc.title}\n\n<!-- ${HOST}/${REPO}@${REF} — ${doc.path} -->\n\n${doc.content}`,
           },
         ],
       };
@@ -459,7 +460,7 @@ export async function start({ autoSync = true } = {}) {
 
 /**
  * Fire a sync without blocking the caller. Failures are logged and swallowed:
- * a refresh that cannot reach GitHub must never take the server down, and the
+ * a refresh that cannot reach GitLab must never take the server down, and the
  * existing index remains served either way.
  * @param {string} label
  */
